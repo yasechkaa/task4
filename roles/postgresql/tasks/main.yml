@@ -1,0 +1,63 @@
+---
+# роли: postgresql
+- name: Добавить ключ репозитория PostgreSQL
+  ansible.builtin.apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+
+- name: Добавить репозиторий PostgreSQL 16
+  apt_repository:
+    repo: "deb http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+    state: present
+    filename: pgdg
+
+- name: Обновление кеша apt
+  apt:
+    update_cache: yes
+
+- name: Установка PostgreSQL 16 и утилит
+  apt:
+    name:
+      - postgresql-16
+      - postgresql-client-16
+      - postgresql-contrib-16
+      - python3-psycopg2
+    state: present
+
+- name: Удалить старый кластер (если есть)
+  shell: |
+    pg_dropcluster --stop 16 main || true
+
+- name: Создать новый кластер PostgreSQL
+  shell: |
+    pg_createcluster --start 16 main --port=5432
+  args:
+    creates: /var/lib/postgresql/16/main
+
+- name: Установить права на каталог данных
+  file:
+    path: /var/lib/postgresql/16/main
+    owner: postgres
+    group: postgres
+    mode: '0700'
+
+- name: Подождать запуска PostgreSQL
+  wait_for:
+    port: 5432
+    host: 127.0.0.1
+    delay: 3
+    timeout: 30
+
+- name: Создать базу bench
+  postgresql_db:
+    name: bench
+    owner: postgres
+  become_user: postgres
+
+- name: Создать пользователя pgbench
+  postgresql_user:
+    name: pgbench
+    password: "pgbench"
+    db: bench
+    priv: "ALL"
+  become_user: postgres

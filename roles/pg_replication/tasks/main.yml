@@ -1,0 +1,93 @@
+---
+# 1. СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ РЕПЛИКАЦИИ (на мастере)
+- name: Создать пользователя replicator на мастере
+  become: yes
+  become_user: postgres
+  shell: |
+    psql -c "CREATE ROLE replicator WITH REPLICATION LOGIN ENCRYPTED PASSWORD 'replpass';" || true
+  when: inventory_hostname in groups['master']
+
+# 2. ОБЩАЯ НАСТРОЙКА СЕТИ (на всех)
+- name: Разрешить подключения в pg_hba.conf
+  become: yes
+  blockinfile:
+    path: /etc/postgresql/16/main/pg_hba.conf
+    block: |
+      host    all             all             0.0.0.0/0               trust
+      host    replication     all             0.0.0.0/0               trust
+
+- name: Настроить listen_addresses на '*'
+  become: yes
+  lineinfile:
+    path: /etc/postgresql/16/main/postgresql.conf
+    regexp: "^#?listen_addresses ="
+    line: "listen_addresses = '*'"
+
+- name: Включить логический WAL на мастере
+  become: yes
+  lineinfile:
+    path: /etc/postgresql/16/main/postgresql.conf
+    regexp: "^#?wal_level ="
+    line: "wal_level = logical"
+  when: inventory_hostname in groups['master']
+
+- name: Перезапустить основной Postgres на мастере
+  become: yes
+  systemd:
+    name: postgresql@16-main
+    state: restarted
+  when: inventory_hostname in groups['master']
+
+# 3. НАСТРОЙКА КЛАСТЕРА LOGIC (на реплике 134)
+- name: Принудительная очистка порта 5433 и кластера
+  become: yes
+  shell: |
+    pg_ctlcluster 16 logic stop --force || true
+    pg_dropcluster --stop 16 logic || true
+  when: inventory_hostname in groups['replica']
+
+- name: Создать и запустить кластер logic
+  become: yes
+  shell: |
+    pg_createcluster 16 logic --port=5433
+    sed -i "s/^#listen_addresses = .*/listen_addresses = '*'/" /etc/postgresql/16/logic/postgresql.conf
+    pg_ctlcluster 16 logic start
+  when: inventory_hostname in groups['replica']
+
+# 4. ЛОГИЧЕСКАЯ РЕПЛИКАЦИЯ
+- name: Создать публикацию на мастере
+  become: yes
+  become_user: postgres
+  shell: psql -c "DROP PUBLICATION IF EXISTS my_pub;" && psql -c "CREATE PUBLICATION my_pub FOR ALL TABLES;"
+  when: inventory_hostname in groups['master']
+
+- name: Настроить подписку на logic (134)
+  become: yes
+  become_user: postgres
+  shell: |
+    psql -p 5433 -c "DROP SUBSCRIPTION IF EXISTS my_sub;" || true
+    psql -p 5433 -c "CREATE SUBSCRIPTION my_sub CONNECTION 'host=192.168.5.133 port=5432 user=postgres dbname=postgres' PUBLICATION my_pub;"
+  when: inventory_hostname in groups['replica']
+
+# 5. ФИЗИЧЕСКАЯ РЕПЛИКАЦИЯ (на 134)
+- name: Подготовка каталога main на реплике
+  become: yes
+  shell: |
+    pg_ctlcluster 16 main stop --force || true
+    rm -rf /var/lib/postgresql/16/main/*
+  when: inventory_hostname in groups['replica']
+
+- name: Выполнить pg_basebackup
+  become: yes
+  become_user: postgres
+  shell: |
+    export PGPASSWORD='replpass'
+    /usr/lib/postgresql/16/bin/pg_basebackup -h 192.168.5.133 -D /var/lib/postgresql/16/main -U replicator -P -R -X stream
+  when: inventory_hostname in groups['replica']
+
+- name: Запустить физическую реплику
+  become: yes
+  systemd:
+    name: postgresql@16-main
+    state: started
+  when: inventory_hostname in groups['replica']

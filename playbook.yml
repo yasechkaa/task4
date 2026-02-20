@@ -1,0 +1,20 @@
+---
+- name: Подготовка всех хостов
+  hosts: all
+  become: yes
+  roles:
+    - common
+
+- name: Настройка PostgreSQL на мастере
+  hosts: master
+  become: yes
+  roles:
+    - postgresql
+
+- name: Настройка PostgreSQL с физической и логической репликацией
+  hosts: all
+  become: yes
+  vars_files:
+    - roles/pg_replication/defaults/main.yml
+  roles:
+    - pg_replication
